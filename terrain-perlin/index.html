@@ -38,6 +38,9 @@
         <div class="row"><label>Size</label><input type="range" id="size" min="40" max="200" step="10" value="100" /><span class="val" id="sizeVal">100</span></div>
         <div class="row"><label>Segments</label><input type="range" id="segments" min="32" max="192" step="16" value="128" /><span class="val" id="segmentsVal">128</span></div>
         <div class="row"><label>Relief thickness</label><input type="range" id="baseThickness" min="1" max="15" step="0.5" value="4" /><span class="val" id="baseThicknessVal">4</span></div>
+        <div class="section-label">Hook / loop (locket)</div>
+        <div class="row"><label>Loop diameter</label><input type="range" id="hookDiameter" min="1" max="12" step="0.5" value="4" /><span class="val" id="hookDiameterVal">4</span></div>
+        <div class="row"><label>Tube thickness</label><input type="range" id="hookTube" min="0.5" max="4" step="0.25" value="1.2" /><span class="val" id="hookTubeVal">1.2</span></div>
         <button class="btn" id="regenerate">Regenerate</button>
         <button class="btn secondary" id="export-obj">Download .OBJ</button>
         <button class="btn secondary" id="export-stl">Download .STL (for Prusa)</button>
@@ -58,6 +61,7 @@
         import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
         import { STLExporter } from 'three/addons/exporters/STLExporter.js';
         import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
+        import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -78,6 +82,7 @@
         let terrain = null;
         let geometry = null;
         let material = null;
+        let hookMesh = null;
 
         function getParams() {
             return {
@@ -90,6 +95,8 @@
                 size: Number(document.getElementById('size').value),
                 segments: Number(document.getElementById('segments').value),
                 baseThickness: Number(document.getElementById('baseThickness').value),
+                hookDiameter: Number(document.getElementById('hookDiameter').value),
+                hookTube: Number(document.getElementById('hookTube').value),
             };
         }
 
@@ -127,14 +134,61 @@
             applyNoise(geometry.attributes.position);
         }
 
+        function getCornerPosition() {
+            if (!geometry) return null;
+            const p = getParams();
+            const segs = p.segments;
+            const idx = segs * (segs + 1) + segs;
+            const pos = geometry.attributes.position;
+            if (idx >= pos.count) return null;
+            return new THREE.Vector3(pos.getX(idx), pos.getY(idx), pos.getZ(idx));
+        }
+
+        function buildHook() {
+            if (hookMesh) {
+                scene.remove(hookMesh);
+                if (hookMesh.geometry) hookMesh.geometry.dispose();
+                if (hookMesh.material) hookMesh.material.dispose();
+            }
+            const { hookDiameter, hookTube } = getParams();
+            const innerRadius = hookDiameter / 2;
+            const majorRadius = innerRadius + hookTube;
+            const tubeRadius = Math.min(hookTube, majorRadius * 0.95);
+            const geo = new THREE.TorusGeometry(majorRadius, tubeRadius, 16, 32);
+            geo.rotateX(Math.PI / 2);
+            geo.rotateZ(Math.PI / 2);
+            geo.rotateY(Math.PI / 4);
+            hookMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x3366ff }));
+            hookMesh.name = 'hook';
+            scene.add(hookMesh);
+            updateHookPosition();
+        }
+
+        function updateHookPosition() {
+            if (!hookMesh || !terrain) return;
+            const p = getParams();
+            const size = p.size;
+            const baseThickness = p.baseThickness;
+            const { hookDiameter, hookTube } = p;
+            const majorRadius = hookDiameter / 2 + hookTube;
+            const pos = geometry.attributes.position;
+            let minY = Infinity;
+            for (let i = 0; i < pos.count; i++) {
+                const y = pos.getY(i);
+                if (y < minY) minY = y;
+            }
+            hookMesh.position.set(size / 2, minY + baseThickness + majorRadius, size / 2);
+        }
+
         function updateFromParams() {
             if (!geometry) return;
             applyNoise(geometry.attributes.position);
+            updateHookPosition();
         }
 
         const noiseParamIds = ['warpScale', 'warpStrength', 'warpSeed', 'heightScale', 'heightAmp', 'heightSeed'];
         const gridParamIds = ['size', 'segments'];
-        const allParamIds = [...noiseParamIds, ...gridParamIds, 'baseThickness'];
+        const allParamIds = [...noiseParamIds, ...gridParamIds, 'baseThickness', 'hookDiameter', 'hookTube'];
 
         function syncLabels() {
             allParamIds.forEach(id => {
@@ -142,7 +196,7 @@
                 const val = document.getElementById(id + 'Val');
                 if (!el || !val) return;
                 if (id === 'warpScale' || id === 'heightScale') val.textContent = Number(el.value).toFixed(3);
-                else if (id === 'warpStrength' || id === 'heightAmp' || id === 'baseThickness') val.textContent = Number(el.value).toFixed(1);
+                else if (id === 'warpStrength' || id === 'heightAmp' || id === 'baseThickness' || id === 'hookDiameter' || id === 'hookTube') val.textContent = Number(el.value).toFixed(1);
                 else val.textContent = el.value;
             });
         }
@@ -220,14 +274,31 @@
             singleGeo.setIndex(indices);
             singleGeo.computeVertexNormals();
 
+            const { hookDiameter, hookTube } = getParams();
+            const majorRadius = hookDiameter / 2 + hookTube;
+            const tubeRadius = Math.min(hookTube, majorRadius * 0.95);
+            const hookGeo = new THREE.TorusGeometry(majorRadius, tubeRadius, 16, 32);
+            hookGeo.rotateX(Math.PI / 2);
+            hookGeo.rotateZ(Math.PI / 2);
+            hookGeo.rotateY(Math.PI / 4);
+            const cornerYPrint = baseThickness + majorRadius;
+            const size = Number(document.getElementById('size').value);
+            hookGeo.applyMatrix4(new THREE.Matrix4().makeTranslation(size / 2, cornerYPrint, size / 2));
+            const mergedGeo = BufferGeometryUtils.mergeBufferGeometries([singleGeo, hookGeo]);
+            hookGeo.dispose();
+            singleGeo.dispose();
+            mergedGeo.computeVertexNormals();
+
             let minBy = Infinity;
-            for (let i = 0; i < totalVerts; i++) {
-                const y = positions[i * 3 + 1];
+            const mergedPositions = mergedGeo.attributes.position;
+            const mergedVertCount = mergedPositions.count;
+            for (let i = 0; i < mergedVertCount; i++) {
+                const y = mergedPositions.getY(i);
                 if (y < minBy) minBy = y;
             }
-            singleGeo.applyMatrix4(new THREE.Matrix4().makeTranslation(0, -minBy, 0));
+            mergedGeo.applyMatrix4(new THREE.Matrix4().makeTranslation(0, -minBy, 0));
 
-            const printMesh = new THREE.Mesh(singleGeo, new THREE.MeshStandardMaterial({ color: 0x3366ff }));
+            const printMesh = new THREE.Mesh(mergedGeo, new THREE.MeshStandardMaterial({ color: 0x3366ff }));
             printMesh.name = 'terrain_print';
             return printMesh;
         }
@@ -236,13 +307,16 @@
             document.getElementById(id).addEventListener('input', () => { syncLabels(); updateFromParams(); });
         });
         gridParamIds.forEach(id => {
-            document.getElementById(id).addEventListener('input', () => { syncLabels(); buildTerrain(); });
+            document.getElementById(id).addEventListener('input', () => { syncLabels(); buildTerrain(); buildHook(); });
         });
         document.getElementById('baseThickness').addEventListener('input', syncLabels);
 
-        document.getElementById('regenerate').addEventListener('click', () => { buildTerrain(); syncLabels(); });
+        document.getElementById('regenerate').addEventListener('click', () => { buildTerrain(); buildHook(); syncLabels(); });
+        document.getElementById('hookDiameter').addEventListener('input', () => { syncLabels(); buildHook(); });
+        document.getElementById('hookTube').addEventListener('input', () => { syncLabels(); buildHook(); });
         syncLabels();
         buildTerrain();
+        buildHook();
 
         function exportMesh(format) {
             const printMesh = buildPrintableMesh();
